@@ -81,7 +81,7 @@ class UserTemplate:
                 return int(checkpoint[key])
         return None
 
-    def __resolve_first_checkpoint_target(self):
+    def __resolve_checkpoint_targets(self):
         default_target = {
             'checkpoint_id': 1,
             'position': [0.0, 0.0, 0.0],
@@ -91,7 +91,7 @@ class UserTemplate:
         res = self.__checkpoints()
         rospy.loginfo('get_checkpoints result: success=%s message=%s', res.success, res.message)
         if not res.success:
-            return default_target
+            return [default_target]
 
         try:
             payload = json.loads(res.message)
@@ -99,31 +99,33 @@ class UserTemplate:
             checkpoints = [cp for cp in checkpoints if isinstance(cp, dict) and self.__get_checkpoint_id(cp) is not None]
             if not checkpoints:
                 rospy.logwarn('No checkpoints found in payload')
-                return default_target
+                return [default_target]
 
-            checkpoint = min(checkpoints, key=self.__get_checkpoint_id)
-            position = checkpoint.get('position', default_target['position'])
+            targets = []
+            for checkpoint in sorted(checkpoints, key=self.__get_checkpoint_id):
+                position = checkpoint.get('position', default_target['position'])
+                if not (isinstance(position, list) and len(position) >= 3):
+                    rospy.logwarn('Invalid position for checkpoint_id=%s, skipped', self.__get_checkpoint_id(checkpoint))
+                    continue
 
-            if not (isinstance(position, list) and len(position) >= 3):
-                rospy.logwarn('Invalid checkpoint position format')
-                return default_target
+                quaternion = default_target['quaternion']
+                attitude = checkpoint.get('attitude')
+                if isinstance(attitude, dict):
+                    attitude_quaternion = attitude.get('quaternion')
+                    if isinstance(attitude_quaternion, list) and len(attitude_quaternion) >= 4:
+                        quaternion = attitude_quaternion
 
-            quaternion = default_target['quaternion']
-            attitude = checkpoint.get('attitude')
-            if isinstance(attitude, dict):
-                attitude_quaternion = attitude.get('quaternion')
-                if isinstance(attitude_quaternion, list) and len(attitude_quaternion) >= 4:
-                    quaternion = attitude_quaternion
-
-            return {
-                'checkpoint_id': self.__get_checkpoint_id(checkpoint),
-                'position': [float(position[0]), float(position[1]), float(position[2])],
-                'quaternion': [float(quaternion[0]), float(quaternion[1]), float(quaternion[2]), float(quaternion[3])],
-            }
+                targets.append({
+                    'checkpoint_id': self.__get_checkpoint_id(checkpoint),
+                    'position': [float(position[0]), float(position[1]), float(position[2])],
+                    'quaternion': [float(quaternion[0]), float(quaternion[1]), float(quaternion[2]), float(quaternion[3])],
+                })
+            if targets:
+                return targets
         except Exception as e:
             rospy.logwarn('Failed to parse checkpoints payload: %s', e)
 
-        return default_target
+        return [default_target]
 
     def __move_to_checkpoint(self, checkpoint_target):
         position = checkpoint_target['position']
@@ -168,11 +170,13 @@ class UserTemplate:
 
             # USER EDIT AREA: define route planning and game-specific flow here.
             # ***********************************************
-            checkpoint_target = self.__resolve_first_checkpoint_target()
-            if not self.__move_to_checkpoint(checkpoint_target):
-                return
-            if not self.__notify_checkpoint_passed(checkpoint_target['checkpoint_id']):
-                return
+            targets = self.__resolve_checkpoint_targets()
+            for checkpoint_target in targets:
+                if not self.__move_to_checkpoint(checkpoint_target):
+                    return
+                if not self.__notify_checkpoint_passed(checkpoint_target['checkpoint_id']):
+                    rospy.logwarn('checkpoint_id=%d not accepted, continuing with next checkpoint',
+                                  checkpoint_target['checkpoint_id'])
             # ***********************************************
 
             if not rospy.is_shutdown():
